@@ -1,6 +1,9 @@
 package com.flink.streaming.web.controller.api;
 
+import com.flink.streaming.common.model.CheckPointParam;
+import com.flink.streaming.web.ao.JobConfigAO;
 import com.flink.streaming.web.ao.JobServerAO;
+import com.flink.streaming.web.common.FlinkConstants;
 import com.flink.streaming.web.common.RestResult;
 import com.flink.streaming.web.common.exceptions.BizException;
 import com.flink.streaming.web.common.util.CliConfigUtil;
@@ -10,7 +13,6 @@ import com.flink.streaming.web.enums.DeployModeEnum;
 import com.flink.streaming.web.enums.SysErrorEnum;
 import com.flink.streaming.web.enums.YN;
 import com.flink.streaming.web.model.dto.JobConfigDTO;
-import com.flink.streaming.web.model.param.CheckPointParam;
 import com.flink.streaming.web.model.param.UpsertJobConfigParam;
 import com.flink.streaming.web.service.JobConfigService;
 import lombok.extern.slf4j.Slf4j;
@@ -40,6 +42,8 @@ public class JobConfigApiController extends BaseController {
 
     @Autowired
     private JobConfigService jobConfigService;
+    @Autowired
+    private JobConfigAO jobConfigAO;
 
     @RequestMapping("/start")
     public RestResult<String> start(Long id, Long savepointId) {
@@ -137,7 +141,7 @@ public class JobConfigApiController extends BaseController {
             if (restResult != null) {
                 return restResult;
             }
-            jobConfigService.addJobConfig(UpsertJobConfigParam.toDTO(upsertJobConfigParam));
+            jobConfigAO.addJobConfig(UpsertJobConfigParam.toDTO(upsertJobConfigParam));
         } catch (BizException biz) {
             log.warn("addJobConfig is error ", biz);
             return RestResult.error(biz.getErrorMsg());
@@ -165,7 +169,7 @@ public class JobConfigApiController extends BaseController {
             if (YN.getYNByValue(jobConfigDTO.getIsOpen()).getCode()) {
                 return RestResult.error(SysErrorEnum.JOB_CONFIG_JOB_IS_OPEN.getErrorMsg());
             }
-            jobConfigService.updateJobConfigById(UpsertJobConfigParam.toDTO(upsertJobConfigParam));
+            jobConfigAO.updateJobConfigById(UpsertJobConfigParam.toDTO(upsertJobConfigParam));
         } catch (BizException biz) {
             log.warn("updateJobConfigById is error ", biz);
             return RestResult.error(biz.getErrorMsg());
@@ -194,22 +198,14 @@ public class JobConfigApiController extends BaseController {
         }
         if (StringUtils.isNotEmpty(upsertJobConfigParam.getFlinkCheckpointConfig())) {
 
-            CheckPointParam checkPointParam = CliConfigUtil.
-                    checkFlinkCheckPoint(upsertJobConfigParam.getFlinkCheckpointConfig());
-            if (checkPointParam != null && StringUtils.isNotEmpty(checkPointParam.getCheckpointingMode())) {
-                if (!("EXACTLY_ONCE".equals(checkPointParam.getCheckpointingMode().toUpperCase())
-                        || "AT_LEAST_ONCE".equals(checkPointParam.getCheckpointingMode().toUpperCase()))) {
-                    return RestResult.error("checkpointingMode 参数必须是  AT_LEAST_ONCE 或者 EXACTLY_ONCE");
-                }
-            }
-            if (checkPointParam != null && StringUtils.isNotEmpty(checkPointParam.getExternalizedCheckpointCleanup())) {
-                if (!("DELETE_ON_CANCELLATION".equals(checkPointParam.getExternalizedCheckpointCleanup().toUpperCase())
-                    || "RETAIN_ON_CANCELLATION".equals(checkPointParam.getExternalizedCheckpointCleanup().toUpperCase()))) {
-                    return RestResult.error("externalizedCheckpointCleanup 参数必须是 DELETE_ON_CANCELLATION  或者 RETAIN_ON_CANCELLATION");
-                }
+            CheckPointParam checkPointParam = CliConfigUtil
+                    .checkFlinkCheckPoint(upsertJobConfigParam.getFlinkCheckpointConfig());
+
+            RestResult restResult = this.checkPointParam(checkPointParam);
+            if (restResult != null && !restResult.isSuccess()) {
+                return restResult;
             }
         }
-
         if (StringUtils.isNotEmpty(upsertJobConfigParam.getExtJarPath())) {
             String[] urls = upsertJobConfigParam.getExtJarPath().split("\n");
             for (String url : urls) {
@@ -260,8 +256,27 @@ public class JobConfigApiController extends BaseController {
                 log.info(" STANDALONE模式启动 {}", deployModeEnum);
                 return jobStandaloneServerAO;
             default:
-                throw new RuntimeException("不支持改模式系统");
+                throw new RuntimeException("不支持该模式系统");
         }
+    }
+
+    private RestResult checkPointParam(CheckPointParam checkPointParam) {
+        if (checkPointParam == null) {
+            return RestResult.success();
+        }
+        if (StringUtils.isNotEmpty(checkPointParam.getCheckpointingMode())) {
+            if (!(FlinkConstants.EXACTLY_ONCE.equals(checkPointParam.getCheckpointingMode().toUpperCase())
+                    || FlinkConstants.AT_LEAST_ONCE.equals(checkPointParam.getCheckpointingMode().toUpperCase()))) {
+                return RestResult.error("checkpointingMode 参数必须是  AT_LEAST_ONCE 或者 EXACTLY_ONCE");
+            }
+        }
+        if (StringUtils.isNotEmpty(checkPointParam.getExternalizedCheckpointCleanup())) {
+            if (!(FlinkConstants.DELETE_ON_CANCELLATION.equals(checkPointParam.getExternalizedCheckpointCleanup().toUpperCase())
+                    || FlinkConstants.RETAIN_ON_CANCELLATION.equals(checkPointParam.getExternalizedCheckpointCleanup().toUpperCase()))) {
+                return RestResult.error("externalizedCheckpointCleanup 参数必须是DELETE_ON_CANCELLATION 或者 RETAIN_ON_CANCELLATION");
+            }
+        }
+        return RestResult.success();
     }
 
 }

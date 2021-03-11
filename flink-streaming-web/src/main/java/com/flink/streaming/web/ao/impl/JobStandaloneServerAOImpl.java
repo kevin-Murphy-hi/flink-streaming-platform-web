@@ -7,7 +7,7 @@ import com.flink.streaming.web.ao.JobServerAO;
 import com.flink.streaming.web.common.MessageConstants;
 import com.flink.streaming.web.common.SystemConstants;
 import com.flink.streaming.web.common.exceptions.BizException;
-import com.flink.streaming.web.common.thread.AsyncThreadPool;
+import com.flink.streaming.web.config.JobThreadPool;
 import com.flink.streaming.web.common.util.CommandUtil;
 import com.flink.streaming.web.common.util.FileUtils;
 import com.flink.streaming.web.common.util.IpUtil;
@@ -71,19 +71,15 @@ public class JobStandaloneServerAOImpl implements JobServerAO {
         if (jobConfigDTO == null) {
             throw new BizException(SysErrorEnum.JOB_CONFIG_JOB_IS_NOT_EXIST);
         }
-        if (JobConfigStatus.RUN.getCode().equals(jobConfigDTO.getStauts().getCode())) {
+        if (JobConfigStatus.RUN.getCode().equals(jobConfigDTO.getStatus().getCode())) {
             throw new BizException("任务运行中请先停止任务");
         }
-        if (jobConfigDTO.getStauts().equals(JobConfigStatus.STARTING)) {
+        if (jobConfigDTO.getStatus().equals(JobConfigStatus.STARTING)) {
             throw new BizException("任务正在启动中 请稍等..");
         }
         if (jobConfigDTO.getIsOpen().intValue() == YN.N.getValue()) {
             throw new BizException("请先开启任务");
         }
-        //TODO
-//        if (StringUtils.isNotEmpty(jobConfigDTO.getJobId())) {
-//
-//        }
 
         Map<String, String> systemConfigMap = SystemConfigDTO.toMap(systemConfigService.getSystemConfig(SysConfigEnumType.SYS));
         this.checkSysConfig(systemConfigMap, jobConfigDTO.getDeployModeEnum());
@@ -104,14 +100,13 @@ public class JobStandaloneServerAOImpl implements JobServerAO {
         jobRunLogDTO.setJobName(jobConfigDTO.getJobName());
         jobRunLogDTO.setJobId(jobConfigDTO.getJobId());
         jobRunLogDTO.setJobStatus(JobStatusEnum.STARTING.name());
+        jobRunLogDTO.setCreator(userName);
+        jobRunLogDTO.setEditor(userName);
         Long jobRunLogId = jobRunLogService.insertJobRunLog(jobRunLogDTO);
 
-        //变更任务状态
-        JobConfigDTO jobConfigUpdate = new JobConfigDTO();
-        jobConfigUpdate.setId(jobConfigDTO.getId());
-        jobConfigUpdate.setLastRunLogId(jobRunLogId);
-        jobConfigUpdate.setStauts(JobConfigStatus.STARTING);
-        jobConfigService.updateJobConfigById(jobConfigUpdate);
+
+        //变更任务状态 有乐观锁 防止重复提交
+        jobConfigService.updateStatusByStart(jobConfigDTO.getId(), userName, jobRunLogId, jobConfigDTO.getVersion());
 
         this.aSyncExec(jobRunParamDTO, jobConfigDTO, jobRunLogId);
 
@@ -134,7 +129,7 @@ public class JobStandaloneServerAOImpl implements JobServerAO {
             }
         }
         JobConfigDTO jobConfig = new JobConfigDTO();
-        jobConfig.setStauts(JobConfigStatus.STOP);
+        jobConfig.setStatus(JobConfigStatus.STOP);
         jobConfig.setEditor(userName);
         jobConfig.setId(id);
         jobConfig.setJobId("");
@@ -157,10 +152,10 @@ public class JobStandaloneServerAOImpl implements JobServerAO {
     @Override
     public void close(Long id, String userName) {
         JobConfigDTO jobConfigDTO = jobConfigService.getJobConfigById(id);
-        if (jobConfigDTO.getStauts().equals(JobConfigStatus.RUN)) {
+        if (jobConfigDTO.getStatus().equals(JobConfigStatus.RUN)) {
             throw new BizException(MessageConstants.MESSAGE_002);
         }
-        if (jobConfigDTO.getStauts().equals(JobConfigStatus.STARTING)) {
+        if (jobConfigDTO.getStatus().equals(JobConfigStatus.STARTING)) {
             throw new BizException(MessageConstants.MESSAGE_003);
         }
         jobConfigService.openOrClose(id, YN.N, userName);
@@ -177,11 +172,10 @@ public class JobStandaloneServerAOImpl implements JobServerAO {
     private void aSyncExec(final JobRunParamDTO jobRunParamDTO, final JobConfigDTO jobConfig, final Long jobRunLogId) {
 
 
-        ThreadPoolExecutor threadPoolExecutor = AsyncThreadPool.getInstance().getThreadPoolExecutor();
+        ThreadPoolExecutor threadPoolExecutor = JobThreadPool.getInstance().getThreadPoolExecutor();
         threadPoolExecutor.execute(new Runnable() {
             @Override
             public void run() {
-
                 boolean success = true;
                 String jobStatus = JobStatusEnum.SUCCESS.name();
                 String appId = "";
@@ -190,7 +184,7 @@ public class JobStandaloneServerAOImpl implements JobServerAO {
                         .append(DateUtil.now()).append("\n")
                         .append("客户端IP：").append(IpUtil.getInstance().getLocalIP()).append("\n")
                         .append("运行模式:").append(jobConfig.getDeployModeEnum().name())
-                        .append("三方jar:").append(jobConfig.getExtJarPath())
+                        .append("三方jar:\n").append(jobConfig.getExtJarPath())
                         .append("\n");
 
                 try {
@@ -237,13 +231,13 @@ public class JobStandaloneServerAOImpl implements JobServerAO {
              */
             private String errorInfoDir() {
                 StringBuilder errorTips = new StringBuilder("\n\n")
-                        .append("详细错误日志可以登录服务器:")
+                        .append("（重要）请登陆服务器分别查看下面两个目录下的错误日志:")
                         .append(IpUtil.getInstance().getLocalIP()).append("\n")
-                        .append("web系统日志目录：")
+                        .append("web系统日志目录（web日志）：")
                         .append(systemConfigService.getSystemConfigByKey(SysConfigEnum.FLINK_STREAMING_PLATFORM_WEB_HOME.getKey()))
                         .append("logs/error.log")
                         .append("\n")
-                        .append("flink提交日志目录：")
+                        .append("flink提交日志目录（flink客户端日志）：")
                         .append(systemConfigService.getSystemConfigByKey(SysConfigEnum.FLINK_HOME.getKey()))
                         .append("log/")
                         .append("\n")
@@ -259,10 +253,10 @@ public class JobStandaloneServerAOImpl implements JobServerAO {
              * @param jobRunLogId
              * @param jobStatus
              * @param localLog
-             * @param jobRunParamDTO
              * @param appId
              */
-            private void updateStatusAndLog(JobConfigDTO jobConfig, Long jobRunLogId, String jobStatus, String localLog, String appId) {
+            private void updateStatusAndLog(JobConfigDTO jobConfig, Long jobRunLogId, String jobStatus,
+                                            String localLog, String appId) {
                 try {
                     JobConfigDTO jobConfigDTO = new JobConfigDTO();
                     jobConfigDTO.setId(jobConfig.getId());
@@ -271,14 +265,14 @@ public class JobStandaloneServerAOImpl implements JobServerAO {
                     jobRunLogDTO.setId(jobRunLogId);
 
                     if (JobStatusEnum.SUCCESS.name().equals(jobStatus) && !StringUtils.isEmpty(appId)) {
-                        jobConfigDTO.setStauts(JobConfigStatus.RUN);
+                        jobConfigDTO.setStatus(JobConfigStatus.RUN);
                         jobConfigDTO.setLastStartTime(new Date());
                         jobConfigDTO.setJobId(appId);
                         jobRunLogDTO.setJobId(appId);
                         jobRunLogDTO.setRemoteLogUrl(systemConfigService.getFlinkHttpAddress(jobConfig.getDeployModeEnum())
                                 + SystemConstants.HTTP_STANDALONE_APPS + jobConfigDTO.getJobId());
                     } else {
-                        jobConfigDTO.setStauts(JobConfigStatus.FAIL);
+                        jobConfigDTO.setStatus(JobConfigStatus.FAIL);
                     }
                     jobConfigService.updateJobConfigById(jobConfigDTO);
 
