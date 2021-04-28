@@ -1,21 +1,21 @@
 package com.flink.streaming.web.controller.api;
 
+import com.flink.streaming.common.constant.SystemConstant;
 import com.flink.streaming.common.model.CheckPointParam;
 import com.flink.streaming.web.ao.JobConfigAO;
 import com.flink.streaming.web.ao.JobServerAO;
 import com.flink.streaming.web.common.FlinkConstants;
 import com.flink.streaming.web.common.RestResult;
-import com.flink.streaming.web.common.exceptions.BizException;
+import com.flink.streaming.web.enums.*;
+import com.flink.streaming.web.exceptions.BizException;
 import com.flink.streaming.web.common.util.CliConfigUtil;
-import com.flink.streaming.web.common.util.HttpUtil;
+import com.flink.streaming.web.common.util.MatcherUtils;
 import com.flink.streaming.web.controller.web.BaseController;
-import com.flink.streaming.web.enums.DeployModeEnum;
-import com.flink.streaming.web.enums.SysErrorEnum;
-import com.flink.streaming.web.enums.YN;
 import com.flink.streaming.web.model.dto.JobConfigDTO;
 import com.flink.streaming.web.model.param.UpsertJobConfigParam;
 import com.flink.streaming.web.service.JobConfigService;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -127,7 +127,7 @@ public class JobConfigApiController extends BaseController {
             return RestResult.error(e.getCode(), e.getErrorMsg());
         } catch (Exception e) {
             log.error("savepoint is error id={}", id, e);
-            return RestResult.error(SysErrorEnum.START_JOB_FAIL);
+            return RestResult.error(SysErrorEnum.SAVEPOINT_JOB_FAIL);
         }
         return RestResult.success();
     }
@@ -156,7 +156,6 @@ public class JobConfigApiController extends BaseController {
     @RequestMapping(value = "/editConfig", method = {RequestMethod.POST})
     public RestResult editConfig(UpsertJobConfigParam upsertJobConfigParam) {
 
-
         try {
             RestResult restResult = checkUpsertJobConfigParam(upsertJobConfigParam);
             if (restResult != null) {
@@ -180,6 +179,43 @@ public class JobConfigApiController extends BaseController {
         return RestResult.success();
     }
 
+    @RequestMapping(value = "/copyConfig", method = {RequestMethod.POST})
+    public RestResult copyConfig(UpsertJobConfigParam upsertJobConfigParam) {
+        try {
+            JobConfigDTO jobConfigDTO = jobConfigService.getJobConfigById(upsertJobConfigParam.getId());
+            if (jobConfigDTO == null) {
+                return RestResult.error("原始拷贝数据不存在");
+            }
+            /*
+             copy job conf
+             默认将id去除
+             默认在任务名称后面copy_随机字符_${jobConfigDTO.getJobName()}字符
+             状态默认重置为停止
+             开启配置 isOpen 0
+             */
+            jobConfigDTO.setId(null);
+            jobConfigDTO.setJobName(String.format("copy_%s_%s",
+                    StringUtils.lowerCase(RandomStringUtils.randomAlphanumeric(4)),jobConfigDTO.getJobName()));
+            jobConfigDTO.setStatus(JobConfigStatus.STOP);
+            jobConfigDTO.setIsOpen(YN.N.getValue());
+            jobConfigDTO.setJobId(null);
+            jobConfigDTO.setLastRunLogId(null);
+            jobConfigDTO.setVersion(0);
+            jobConfigDTO.setLastStartTime(null);
+            jobConfigDTO.setLastRunLogId(null);
+
+            jobConfigAO.addJobConfig(jobConfigDTO);
+
+        } catch (BizException biz) {
+            log.warn("copyJobConfigById is error ", biz);
+            return RestResult.error(biz.getErrorMsg());
+        } catch (Exception e) {
+            log.error("copyJobConfigById is error", e);
+            return RestResult.error(e.getMessage());
+        }
+        return RestResult.success();
+    }
+
     private RestResult checkUpsertJobConfigParam(UpsertJobConfigParam upsertJobConfigParam) {
         if (upsertJobConfigParam == null) {
             return RestResult.error("参数不能空");
@@ -193,36 +229,59 @@ public class JobConfigApiController extends BaseController {
         if (!upsertJobConfigParam.getJobName().matches("[0-9A-Za-z_]*")) {
             return RestResult.error("任务名称仅能含数字,字母和下划线");
         }
-        if (StringUtils.isEmpty(upsertJobConfigParam.getFlinkSql())) {
-            return RestResult.error("sql语句不能为空");
-        }
-        if (StringUtils.isNotEmpty(upsertJobConfigParam.getFlinkCheckpointConfig())) {
 
+
+        //jar需要校验参数
+        if (JobTypeEnum.JAR.equals(upsertJobConfigParam.getJobType())){
+
+            if (StringUtils.isEmpty(upsertJobConfigParam.getCustomMainClass())){
+                return RestResult.error("主类不能为空");
+            }
+
+            if (StringUtils.isEmpty(upsertJobConfigParam.getCustomJarUrl())){
+                return RestResult.error("主类jar的http地址不能为空");
+            }
+            if (MatcherUtils.isHttpsOrHttp(upsertJobConfigParam.getCustomJarUrl())){
+                return RestResult.error("主类jar的http地址 不是http或者https:" + upsertJobConfigParam.getCustomJarUrl());
+            }
+        }
+        //sql配置需要校验的参数JobType=null是兼容之前配置
+        if (JobTypeEnum.SQL.equals(upsertJobConfigParam.getJobType())
+                || upsertJobConfigParam.getJobType()==null
+                || JobTypeEnum.SQL.getCode()==upsertJobConfigParam.getJobType().intValue()){
+            if (StringUtils.isEmpty(upsertJobConfigParam.getFlinkSql())) {
+                return RestResult.error("sql语句不能为空");
+            }
+            if (StringUtils.isNotEmpty(upsertJobConfigParam.getExtJarPath())) {
+                String[] urls = upsertJobConfigParam.getExtJarPath().split(SystemConstant.LINE_FEED);
+                for (String url : urls) {
+                    if (StringUtils.isEmpty(url)) {
+                        continue;
+                    }
+                    if (!MatcherUtils.isHttpsOrHttp(url)) {
+                        return RestResult.error("udf地址错误： 非法的http或者是https地址 url=" + url);
+                    }
+                }
+            }
+        }
+
+
+
+        if (StringUtils.isNotEmpty(upsertJobConfigParam.getFlinkCheckpointConfig())) {
             CheckPointParam checkPointParam = CliConfigUtil
                     .checkFlinkCheckPoint(upsertJobConfigParam.getFlinkCheckpointConfig());
-
             RestResult restResult = this.checkPointParam(checkPointParam);
             if (restResult != null && !restResult.isSuccess()) {
                 return restResult;
             }
         }
-        if (StringUtils.isNotEmpty(upsertJobConfigParam.getExtJarPath())) {
-            String[] urls = upsertJobConfigParam.getExtJarPath().split("\n");
-            for (String url : urls) {
-                if (StringUtils.isEmpty(url)) {
-                    continue;
-                }
-                if (!HttpUtil.isHttpsOrHttp(url)) {
-                    return RestResult.error("udf地址错误： 非法的http或者是https地址 url=" + url);
-                }
-            }
-        }
+
 
         if (DeployModeEnum.YARN_PER.name().equals(upsertJobConfigParam.getDeployMode())) {
             if (StringUtils.isEmpty(upsertJobConfigParam.getFlinkRunConfig())) {
                 return RestResult.error("flink运行配置不能为空");
             }
-            RestResult restResult = CliConfigUtil.checkFlinkRunConfig(upsertJobConfigParam.getFlinkRunConfig());
+            RestResult restResult = CliConfigUtil.checkFlinkRunConfigForYarn(upsertJobConfigParam.getFlinkRunConfig());
             if (restResult != null) {
                 return restResult;
             }
@@ -259,6 +318,7 @@ public class JobConfigApiController extends BaseController {
                 throw new RuntimeException("不支持该模式系统");
         }
     }
+
 
     private RestResult checkPointParam(CheckPointParam checkPointParam) {
         if (checkPointParam == null) {
